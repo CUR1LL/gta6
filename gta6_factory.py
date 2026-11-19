@@ -8,7 +8,7 @@ import requests
 GAME_NAME     = "Grand Theft Auto VI"
 HOURS         = 24              # за сколько часов искать клипы
 MAX_CLIPS     = 5               # сколько роликов в день
-LANGS         = ["ru"]          # добавь "en", если мало материала
+LANGS         = ["ru, en"]          # добавь "en", если мало материала
 MIN_VIEWS     = 500             # мин. просмотров клипа на Twitch
 SUBS          = True            # субтитры
 WHISPER_MODEL = "base"
