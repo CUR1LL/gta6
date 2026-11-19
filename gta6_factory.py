@@ -212,7 +212,9 @@ def main():
                 "-o", raw, f"https://clips.twitch.tv/{c['id']}"])
             segs = transcribe(raw)
             tmp = f"out_{i:02d}.mp4"
-            render(raw, tmp, login, c["title"], CAM.get(login), segs)
+            cam = CAM.get(login) or find_cam(raw)
+            print("  вебка:", cam if cam else "не найдена — центр геймплея")
+            render(raw, tmp, login, c["title"], cam, segs)
             stem = day / f"{i:02d}_{login}_{c['view_count']}views"
             (WORK / tmp).replace(stem.with_suffix(".mp4"))
             caption = (f"{c['title']} | GTA 6\n\n"
