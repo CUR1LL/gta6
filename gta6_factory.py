@@ -6,10 +6,10 @@ import requests
 
 # ================= НАСТРОЙКИ =================
 GAME_NAME     = "Grand Theft Auto VI"
-HOURS         = 24              # за сколько часов искать клипы
+HOURS         = 48              # за сколько часов искать клипы
 MAX_CLIPS     = 5               # сколько роликов в день
-LANGS         = ["ru, en"]          # добавь "en", если мало материала
-MIN_VIEWS     = 500             # мин. просмотров клипа на Twitch
+LANGS         = ["ru", "en", "es", "pt"]          # добавь "en", если мало материала
+MIN_VIEWS     = 50             # мин. просмотров клипа на Twitch
 SUBS          = True            # субтитры
 WHISPER_MODEL = "base"
 CAM = {                         # вебка стримеров: (x, y, w, h) в 1920x1080
