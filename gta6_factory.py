@@ -1,20 +1,22 @@
 # -*- coding: utf-8 -*-
-# Фабрика нарезок GTA 6 для GitHub Actions: Twitch -> вертикальные клипы -> Telegram
+# Фабрика нарезок GTA 6 v2: Twitch-клипы + громкие моменты из полных стримов -> Telegram
 import os, sys, json, re, shutil, subprocess, textwrap, datetime as dt
 from pathlib import Path
 import requests
 
 # ================= НАСТРОЙКИ =================
 GAME_NAME     = "Grand Theft Auto VI"
-HOURS         = 24              # за сколько часов искать клипы
-MAX_CLIPS     = 5               # сколько роликов в день
-LANGS         = ["ru", "en", "es", "pt"]          # добавь "en", если мало материала
-MIN_VIEWS     = 50            # мин. просмотров клипа на Twitch
-SUBS          = True            # субтитры
+HOURS         = 24
+MAX_CLIPS     = 5
+LANGS         = ["ru", "en"]
+MIN_VIEWS     = 500
+SUBS          = True
 WHISPER_MODEL = "base"
-CAM = {                         # вебка стримеров: (x, y, w, h) в 1920x1080
-    # "login_стримера": (1490, 760, 420, 310),
-}
+WATCH         = ["dinah", "lirik"]
+VOD_PER_DAY   = 1
+VOD_LEN       = 50
+VOD_FRESH_H   = 36
+CAM = {}
 CLIENT_ID     = os.environ.get("TWITCH_ID", "")
 CLIENT_SECRET = os.environ.get("TWITCH_SECRET", "")
 TG_TOKEN      = os.environ.get("TG_TOKEN", "")
@@ -25,7 +27,9 @@ BASE = Path(__file__).parent
 WORK = BASE / "_work"; WORK.mkdir(exist_ok=True)
 OUT  = BASE / "READY"
 LOG  = BASE / "processed.json"
-done = json.loads(LOG.read_text(encoding="utf-8")) if LOG.exists() else {}
+done = {} if os.environ.get("RESET") == "1" else (json.loads(LOG.read_text(encoding="utf-8")) if LOG.exists() else {})
+CAMLOG = BASE / "cam_memory.json"
+cam_mem = json.loads(CAMLOG.read_text(encoding="utf-8")) if CAMLOG.exists() else {}
 FONTS = ["/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
          r"C:\Windows\Fonts\arialbd.ttf",
          "/System/Library/Fonts/Supplemental/Arial Bold.ttf"]
@@ -55,68 +59,105 @@ def send_video(mp4, caption):
     if not r.get("ok"):
         raise RuntimeError(f"Telegram: {r}")
 
-def top_clips():
+def twitch_headers():
     resp = requests.post("https://id.twitch.tv/oauth2/token", params={
         "client_id": CLIENT_ID, "client_secret": CLIENT_SECRET,
         "grant_type": "client_credentials"}, timeout=30).json()
     if "access_token" not in resp:
         sys.exit(f"Twitch ключи не сработали: {resp}")
-    h = {"Client-ID": CLIENT_ID, "Authorization": f"Bearer {resp['access_token']}"}
-    g = requests.get("https://api.twitch.tv/helix/games",
-                     params={"name": GAME_NAME}, headers=h, timeout=30).json()["data"]
+    return {"Client-ID": CLIENT_ID, "Authorization": f"Bearer {resp['access_token']}"}
+
+def helix(path, params, h):
+    return requests.get("https://api.twitch.tv/helix/" + path,
+                        params=params, headers=h, timeout=30).json()
+
+def top_clips(h):
+    g = helix("games", {"name": GAME_NAME}, h)["data"]
     if not g:
         sys.exit(f"Категория '{GAME_NAME}' не найдена на Twitch")
     now = dt.datetime.now(dt.timezone.utc)
-    clips = requests.get("https://api.twitch.tv/helix/clips", headers=h, timeout=30,
-        params={"game_id": g[0]["id"], "first": 100,
-                "started_at": (now - dt.timedelta(hours=HOURS)).strftime("%Y-%m-%dT%H:%M:%SZ"),
-                "ended_at": now.strftime("%Y-%m-%dT%H:%M:%SZ")}).json()["data"]
+    clips = helix("clips", {"game_id": g[0]["id"], "first": 100,
+        "started_at": (now - dt.timedelta(hours=HOURS)).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "ended_at": now.strftime("%Y-%m-%dT%H:%M:%SZ")}, h)["data"]
     clips = [c for c in clips if 8 <= c["duration"] <= 60
              and c["view_count"] >= MIN_VIEWS and c["id"] not in done
              and (not LANGS or c["language"] in LANGS)]
     clips.sort(key=lambda c: -c["view_count"])
     return clips[:MAX_CLIPS]
 
-_model = None
-def transcribe(src):
-    global _model
-    if not SUBS:
-        return []
-    try:
-        from faster_whisper import WhisperModel
-    except ImportError:
-        print("  (faster-whisper не установлен — без субтитров)")
-        return []
-    if _model is None:
-        _model = WhisperModel(WHISPER_MODEL, device="cpu", compute_type="int8")
-    segs, _ = _model.transcribe(str(WORK / src), vad_filter=True)
-    return [(s.start, s.end, s.text.strip()) for s in segs if s.text.strip()]
+def audio_energy(m3u8):
+    import numpy as np
+    p = subprocess.Popen(["ffmpeg", "-nostdin", "-loglevel", "error", "-i", m3u8,
+                          "-vn", "-ac", "1", "-ar", "8000", "-f", "s16le", "-"],
+                         stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, cwd=WORK)
+    vals, chunk, buf = [], 16000, b""
+    while True:
+        piece = p.stdout.read(chunk)
+        if not piece:
+            break
+        buf += piece
+        while len(buf) >= chunk:
+            part, buf = buf[:chunk], buf[chunk:]
+            a = np.frombuffer(part, dtype="<i2") / 32768.0
+            vals.append(float(np.sqrt(np.mean(a * a)) + 1e-9))
+    p.wait()
+    return vals
 
-def ts(t):
-    return f"{int(t // 3600)}:{int(t % 3600 // 60):02d}:{t % 60:05.2f}"
+def pick_peaks(vals, k, length):
+    if len(vals) < 600:
+        return []
+    sm = [sum(vals[max(0, i - 2):i + 3]) / len(vals[max(0, i - 2):i + 3]) for i in range(len(vals))]
+    lo, hi = 300, len(sm) - 300 - length
+    if hi <= lo:
+        return []
+    picks = []
+    for i in sorted(range(lo, hi), key=lambda i: -sm[i]):
+        if all(abs(i - p) > 180 for p in picks):
+            picks.append(i)
+        if len(picks) >= k:
+            break
+    return sorted(picks)
 
-def make_ass(segments):
-    head = ("[Script Info]\nPlayResX: 1080\nPlayResY: 1920\nScaledBorderAndShadow: yes\n\n"
-            "[V4+ Styles]\nFormat: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, "
-            "OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, "
-            "Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\n"
-            "Style: Default,DejaVu Sans,62,&H00FFFFFF,&H00FFFFFF,&H00000000,&H00000000,"
-            "-1,0,0,0,100,100,0,0,1,4,0,2,60,60,470,1\n\n"
-            "[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n")
-    lines = []
-    for a, b, text in segments:
-        words = textwrap.wrap(text, 26) or [text]
-        pairs = ["\\N".join(words[i:i + 2]) for i in range(0, len(words), 2)]
-        total = sum(len(p) for p in pairs) or 1
-        t = a
-        for p in pairs:
-            d = (b - a) * len(p) / total
-            lines.append(f"Dialogue: 0,{ts(t)},{ts(t + d)},Default,,0,0,0,,{p}")
-            t += d
-    (WORK / "subs.ass").write_text(head + "\n".join(lines) + "\n", encoding="utf-8")
+def fmt_hms(s):
+    return f"{int(s) // 3600}:{int(s) % 3600 // 60:02d}:{int(s) % 60:02d}"
+
+def vod_jobs(h):
+    jobs = []
+    for login in WATCH:
+        try:
+            u = helix("users", {"login": login}, h)["data"]
+            if not u:
+                continue
+            vids = helix("videos", {"user_id": u[0]["id"], "type": "archive", "first": 1}, h)["data"]
+            if not vids:
+                continue
+            v = vids[0]
+            age = dt.datetime.now(dt.timezone.utc) - dt.datetime.fromisoformat(v["created_at"].replace("Z", "+00:00"))
+            if age > dt.timedelta(hours=VOD_FRESH_H):
+                continue
+            key = f"vod_{v['id']}"
+            if key in done:
+                continue
+            print(f"VOD {login}: анализирую {v['title']}")
+            vurl = sh([sys.executable, "-m", "yt_dlp", "-g", "-f", "best[height<=1080]/best", v["url"]]).strip().splitlines()[-1]
+            aurl = sh([sys.executable, "-m", "yt_dlp", "-g", "-f", "worstaudio/bestaudio", v["url"]]).strip().splitlines()[-1]
+            for start in pick_peaks(audio_energy(aurl), VOD_PER_DAY, VOD_LEN):
+                jobs.append({"login": login, "name": u[0]["display_name"],
+                             "start": start, "url": vurl, "vod": v})
+                print(f"  пик на {fmt_hms(start)}")
+            done[key] = dt.date.today().isoformat()
+            LOG.write_text(json.dumps(done, ensure_ascii=False), encoding="utf-8")
+        except Exception as e:
+            print(f"  [VOD пропуск] {login}: {e}")
+    return jobs
+
+def cut_vod(job, out):
+    sh(["ffmpeg", "-nostdin", "-y", "-ss", str(job["start"]), "-t", str(VOD_LEN),
+        "-i", job["url"], "-c:v", "libx264", "-preset", "fast", "-crf", "19",
+        "-pix_fmt", "yuv420p", "-r", "30", "-c:a", "aac", "-b:a", "192k", "-ar", "48000",
+        "-movflags", "+faststart", out])
 
 def find_cam(src):
-    """Автопоиск вебки: лицо, стабильно сидящее у края кадра."""
     try:
         import cv2, statistics
     except ImportError:
@@ -172,6 +213,29 @@ def find_cam(src):
     y0 = min(max(cy + 0.10 * ch - ch / 2, 0.0), 1.0 - ch)
     return (int(x0 * 1920), int(y0 * 1080), int(cw * 1920), int(ch * 1080))
 
+def ts(t):
+    return f"{int(t // 3600)}:{int(t % 3600 // 60):02d}:{t % 60:05.2f}"
+
+def make_ass(segments):
+    head = ("[Script Info]\nPlayResX: 1080\nPlayResY: 1920\nScaledBorderAndShadow: yes\n\n"
+            "[V4+ Styles]\nFormat: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, "
+            "OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, "
+            "Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\n"
+            "Style: Default,DejaVu Sans,62,&H00FFFFFF,&H00FFFFFF,&H00000000,&H00000000,"
+            "-1,0,0,0,100,100,0,0,1,4,0,2,60,60,470,1\n\n"
+            "[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n")
+    lines = []
+    for a, b, text in segments:
+        words = textwrap.wrap(text, 26) or [text]
+        pairs = ["\\N".join(words[i:i + 2]) for i in range(0, len(words), 2)]
+        total = sum(len(p) for p in pairs) or 1
+        t = a
+        for p in pairs:
+            d = (b - a) * len(p) / total
+            lines.append(f"Dialogue: 0,{ts(t)},{ts(t + d)},Default,,0,0,0,,{p}")
+            t += d
+    (WORK / "subs.ass").write_text(head + "\n".join(lines) + "\n", encoding="utf-8")
+
 def render(src, out, login, title, cam, segments):
     title = re.sub(r"[^\w\s.,!?'\"-]", "", title, flags=re.UNICODE).strip() or "GTA 6"
     (WORK / "title.txt").write_text("\n".join(textwrap.wrap(title, 24)[:3]), encoding="utf-8")
@@ -206,56 +270,95 @@ def render(src, out, login, title, cam, segments):
         "-r", "30", "-c:a", "aac", "-b:a", "192k", "-ar", "48000",
         "-movflags", "+faststart", out])
 
+_model = None
+def transcribe(src):
+    global _model
+    if not SUBS:
+        return []
+    try:
+        from faster_whisper import WhisperModel
+    except ImportError:
+        print("  (faster-whisper не установлен — без субтитров)")
+        return []
+    if _model is None:
+        _model = WhisperModel(WHISPER_MODEL, device="cpu", compute_type="int8")
+    segs, _ = _model.transcribe(str(WORK / src), vad_filter=True)
+    return [(s.start, s.end, s.text.strip()) for s in segs if s.text.strip()]
+
+def make_clip(raw, login, title, caption, stem):
+    try:
+        segs = transcribe(raw)
+    except Exception as e:
+        print("  субтитры упали, делаю без них:", e)
+        segs = []
+    cam, source = CAM.get(login), "пресет"
+    if cam is None:
+        try:
+            cam = find_cam(raw)
+            source = "авто"
+        except Exception as e:
+            print("  поиск вебки упал:", e)
+    if cam is None:
+        cam = tuple(cam_mem.get(login, ())) or None
+        source = "память"
+    elif source == "авто":
+        cam_mem[login] = list(cam)
+        CAMLOG.write_text(json.dumps(cam_mem, ensure_ascii=False), encoding="utf-8")
+    print("  вебка:", cam if cam else "не найдена — центр геймплея", f"({source})")
+    tmp = f"out_{stem.name}.mp4"
+    render(raw, tmp, login, title, cam, segs)
+    (WORK / tmp).replace(stem.with_suffix(".mp4"))
+    stem.with_suffix(".txt").write_text(caption, encoding="utf-8")
+    send_video(stem.with_suffix(".mp4"), caption)
+
 def main():
     if not FONT:
         sys.exit("Нет шрифта с кириллицей (в workflow ставится fonts-dejavu-core)")
     if not (CLIENT_ID and CLIENT_SECRET and TG_TOKEN and TG_CHAT):
         sys.exit("Не заданы секреты TWITCH_ID / TWITCH_SECRET / TG_TOKEN / TG_CHAT")
-    clips = top_clips()
-    if not clips:
-        send_text("GTA 6: свежих клипов по фильтрам сегодня нет. Снизь MIN_VIEWS или добавь язык в LANGS.")
-        print("Клипов нет.")
+    h = twitch_headers()
+    clips = top_clips(h)
+    vjobs = vod_jobs(h)
+    total = len(clips) + len(vjobs)
+    if total == 0:
+        send_text("GTA 6: сегодня ничего не найдено ни в клипах, ни в стримах.")
         return
-    print(f"Отобрано клипов: {len(clips)}")
+    print(f"Клипов: {len(clips)}, VOD-моментов: {len(vjobs)}")
     day = OUT / dt.date.today().isoformat(); day.mkdir(parents=True, exist_ok=True)
     ok, errors = 0, []
     for i, c in enumerate(clips, 1):
         login = c["url"].split("twitch.tv/")[-1].split("/")[0].lower()
-        print(f"[{i}/{len(clips)}] {login}: {c['title']} ({c['view_count']} просмотров)")
+        print(f"[clip {i}/{len(clips)}] {login}: {c['title']}")
         try:
             raw = f"raw_{c['id']}.mp4"
             sh([sys.executable, "-m", "yt_dlp", "-f", "best[height<=1080]/best",
                 "-o", raw, f"https://clips.twitch.tv/{c['id']}"])
-            try:
-                segs = transcribe(raw)
-            except Exception as e:
-                print("  субтитры упали, делаю без них:", e)
-                segs = []
-            cam = CAM.get(login)
-            if cam is None:
-                try:
-                    cam = find_cam(raw)
-                except Exception as e:
-                    print("  поиск вебки упал:", e)
-            print("  вебка:", cam if cam else "не найдена — центр геймплея")
-            tmp = f"out_{i:02d}.mp4"
-            render(raw, tmp, login, c["title"], cam, segs)
-            stem = day / f"{i:02d}_{login}_{c['view_count']}views"
-            (WORK / tmp).replace(stem.with_suffix(".mp4"))
-            caption = (f"{c['title']} | GTA 6\n\n"
-                       f"Момент со стрима {c['broadcaster_name']}\n"
+            caption = (f"{c['title']} | GTA 6\n\nМомент со стрима {c['broadcaster_name']}\n"
                        f"Оригинал: {c['url']}\nКанал: https://twitch.tv/{login}\n\n"
                        f"#GTA6 #ГТА6 #GTAVI #ViceCity #нарезки #стрим")
-            stem.with_suffix(".txt").write_text(caption, encoding="utf-8")
-            send_video(stem.with_suffix(".mp4"), caption)
+            make_clip(raw, login, c["title"], caption, day / f"{i:02d}_{login}_{c['view_count']}views")
             done[c["id"]] = dt.date.today().isoformat()
             LOG.write_text(json.dumps(done, ensure_ascii=False), encoding="utf-8")
             ok += 1
-            print("  [OK] отправлено в Telegram")
         except Exception as e:
             errors.append(f"{login}: {str(e)[:250]}")
             print(f"  [ПРОПУСК] {e}")
-    msg = f"Готово: {ok} из {len(clips)} клипов отправлено. Выкладывай!"
+    for i, job in enumerate(vjobs, 1):
+        login = job["login"]
+        print(f"[vod {i}/{len(vjobs)}] {login} @ {fmt_hms(job['start'])}")
+        try:
+            raw = f"raw_vod_{login}_{job['start']}.mp4"
+            cut_vod(job, raw)
+            caption = (f"Громкий момент со стрима {job['name']} | GTA 6\n\n"
+                       f"Полный стрим: {job['vod']['url']}\nКанал: https://twitch.tv/{login}\n\n"
+                       f"#GTA6 #ГТА6 #GTAVI #ViceCity #нарезки #стрим")
+            make_clip(raw, login, f"{job['name']}: громкий момент", caption,
+                      day / f"vod_{i:02d}_{login}_{job['start']}s")
+            ok += 1
+        except Exception as e:
+            errors.append(f"vod {login}: {str(e)[:250]}")
+            print(f"  [ПРОПУСК] {e}")
+    msg = f"Готово: {ok} из {total} роликов отправлено. Выкладывай!"
     if errors:
         msg += "\n\nОшибки (первая):\n" + errors[0]
     send_text(msg)
