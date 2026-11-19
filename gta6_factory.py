@@ -6,10 +6,10 @@ import requests
 
 # ================= НАСТРОЙКИ =================
 GAME_NAME     = "Grand Theft Auto VI"
-HOURS         = 48              # за сколько часов искать клипы
+HOURS         = 24              # за сколько часов искать клипы
 MAX_CLIPS     = 5               # сколько роликов в день
 LANGS         = ["ru", "en", "es", "pt"]          # добавь "en", если мало материала
-MIN_VIEWS     = 50             # мин. просмотров клипа на Twitch
+MIN_VIEWS     = 500            # мин. просмотров клипа на Twitch
 SUBS          = True            # субтитры
 WHISPER_MODEL = "base"
 CAM = {                         # вебка стримеров: (x, y, w, h) в 1920x1080
@@ -202,7 +202,7 @@ def main():
         return
     print(f"Отобрано клипов: {len(clips)}")
     day = OUT / dt.date.today().isoformat(); day.mkdir(parents=True, exist_ok=True)
-    ok = 0
+    ok, errors = 0, []
     for i, c in enumerate(clips, 1):
         login = c["url"].split("twitch.tv/")[-1].split("/")[0].lower()
         print(f"[{i}/{len(clips)}] {login}: {c['title']} ({c['view_count']} просмотров)")
@@ -210,10 +210,19 @@ def main():
             raw = f"raw_{c['id']}.mp4"
             sh([sys.executable, "-m", "yt_dlp", "-f", "best[height<=1080]/best",
                 "-o", raw, f"https://clips.twitch.tv/{c['id']}"])
-            segs = transcribe(raw)
-            tmp = f"out_{i:02d}.mp4"
-            cam = CAM.get(login) or find_cam(raw)
+            try:
+                segs = transcribe(raw)
+            except Exception as e:
+                print("  субтитры упали, делаю без них:", e)
+                segs = []
+            cam = CAM.get(login)
+            if cam is None:
+                try:
+                    cam = find_cam(raw)
+                except Exception as e:
+                    print("  поиск вебки упал:", e)
             print("  вебка:", cam if cam else "не найдена — центр геймплея")
+            tmp = f"out_{i:02d}.mp4"
             render(raw, tmp, login, c["title"], cam, segs)
             stem = day / f"{i:02d}_{login}_{c['view_count']}views"
             (WORK / tmp).replace(stem.with_suffix(".mp4"))
@@ -228,8 +237,12 @@ def main():
             ok += 1
             print("  [OK] отправлено в Telegram")
         except Exception as e:
+            errors.append(f"{login}: {str(e)[:250]}")
             print(f"  [ПРОПУСК] {e}")
-    send_text(f"Готово: {ok} из {len(clips)} клипов отправлено. Выкладывай!")
+    msg = f"Готово: {ok} из {len(clips)} клипов отправлено. Выкладывай!"
+    if errors:
+        msg += "\n\nОшибки (первая):\n" + errors[0]
+    send_text(msg)
 
 if __name__ == "__main__":
     main()
