@@ -116,46 +116,53 @@ def make_ass(segments):
     (WORK / "subs.ass").write_text(head + "\n".join(lines) + "\n", encoding="utf-8")
 
 def find_cam(src):
-    """Автопоиск вебки: лицо, стабильно сидящее в углу кадра."""
+    """Автопоиск вебки: лицо, стабильно сидящее у края кадра."""
     try:
         import cv2, statistics
     except ImportError:
+        print("  (opencv не установлен — пропускаю поиск вебки)")
         return None
     cap = cv2.VideoCapture(str(WORK / src))
     total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
     if total < 10:
         cap.release()
         return None
-    cascade = cv2.CascadeClassifier(
-        cv2.data.haarcascades + "haarcascade_frontalface_default.xml")
+    casc = [cv2.CascadeClassifier(cv2.data.haarcascades + n)
+            for n in ("haarcascade_frontalface_default.xml",
+                      "haarcascade_frontalface_alt2.xml",
+                      "haarcascade_profileface.xml")]
     hits, checked = {}, 0
-    for k in range(8):
-        cap.set(cv2.CAP_PROP_POS_FRAMES, int(total * (k + 0.5) / 8))
+    for k in range(10):
+        cap.set(cv2.CAP_PROP_POS_FRAMES, int(total * (k + 0.5) / 10))
         ok, frame = cap.read()
         if not ok:
             continue
         checked += 1
         H, W = frame.shape[:2]
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        faces = cascade.detectMultiScale(gray, 1.15, 5,
-                                         minSize=(int(W * 0.03), int(W * 0.03)))
-        for x, y, w, h in faces:
+        gray = cv2.equalizeHist(cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY))
+        found = []
+        for c in casc:
+            faces = c.detectMultiScale(gray, 1.1, 3,
+                                       minSize=(int(W * 0.025), int(W * 0.025)))
+            for x, y, w, h in faces:
+                if all(abs(x - fx) + abs(y - fy) > (w + fw) / 2 for fx, fy, fw, fh in found):
+                    found.append((x, y, w, h))
+        for x, y, w, h in found:
             cx, cy = (x + w / 2) / W, (y + h / 2) / H
-            if (cx < 0.32 or cx > 0.68) and (cy < 0.38 or cy > 0.62):
-                corner = ("L" if cx < 0.5 else "R") + ("T" if cy < 0.5 else "B")
-                hits.setdefault(corner, []).append((cx, cy, w / W))
+            if (cy < 0.35 or cy > 0.62) or (cx < 0.3 or cx > 0.7):
+                zone = ("T" if cy < 0.5 else "B") + ("L" if cx < 0.4 else "R" if cx > 0.6 else "C")
+                hits.setdefault(zone, []).append((cx, cy, w / W))
     cap.release()
-    if not hits:
+    print("  зоны с лицами:", {k: len(v) for k, v in hits.items()})
+    if not hits or checked == 0:
         return None
-    corner, boxes = max(hits.items(), key=lambda kv: len(kv[1]))
-    if len(boxes) < max(3, checked * 0.5):
+    zone, boxes = max(hits.items(), key=lambda kv: len(kv[1]))
+    if len(boxes) < max(4, checked * 0.4):
         return None
     cx = statistics.median(b[0] for b in boxes)
     cy = statistics.median(b[1] for b in boxes)
-    cw = statistics.median(b[2] for b in boxes) * 2.2
-    if not 0.10 <= cw <= 0.45:
-        return None
-    ch = cw  # для 16:9-кадра прямоугольник 16:9 даёт равные нормализованные доли
+    cw = min(max(statistics.median(b[2] for b in boxes) * 2.3, 0.10), 0.45)
+    ch = cw
     x0 = min(max(cx - cw / 2, 0.0), 1.0 - cw)
     y0 = min(max(cy + 0.08 * ch - ch / 2, 0.0), 1.0 - ch)
     return (int(x0 * 1920), int(y0 * 1080), int(cw * 1920), int(ch * 1080))
