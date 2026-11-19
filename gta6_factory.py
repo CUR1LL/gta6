@@ -115,6 +115,51 @@ def make_ass(segments):
             t += d
     (WORK / "subs.ass").write_text(head + "\n".join(lines) + "\n", encoding="utf-8")
 
+def find_cam(src):
+    """Автопоиск вебки: лицо, стабильно сидящее в углу кадра."""
+    try:
+        import cv2, statistics
+    except ImportError:
+        return None
+    cap = cv2.VideoCapture(str(WORK / src))
+    total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    if total < 10:
+        cap.release()
+        return None
+    cascade = cv2.CascadeClassifier(
+        cv2.data.haarcascades + "haarcascade_frontalface_default.xml")
+    hits, checked = {}, 0
+    for k in range(8):
+        cap.set(cv2.CAP_PROP_POS_FRAMES, int(total * (k + 0.5) / 8))
+        ok, frame = cap.read()
+        if not ok:
+            continue
+        checked += 1
+        H, W = frame.shape[:2]
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        faces = cascade.detectMultiScale(gray, 1.15, 5,
+                                         minSize=(int(W * 0.03), int(W * 0.03)))
+        for x, y, w, h in faces:
+            cx, cy = (x + w / 2) / W, (y + h / 2) / H
+            if (cx < 0.32 or cx > 0.68) and (cy < 0.38 or cy > 0.62):
+                corner = ("L" if cx < 0.5 else "R") + ("T" if cy < 0.5 else "B")
+                hits.setdefault(corner, []).append((cx, cy, w / W))
+    cap.release()
+    if not hits:
+        return None
+    corner, boxes = max(hits.items(), key=lambda kv: len(kv[1]))
+    if len(boxes) < max(3, checked * 0.5):
+        return None
+    cx = statistics.median(b[0] for b in boxes)
+    cy = statistics.median(b[1] for b in boxes)
+    cw = statistics.median(b[2] for b in boxes) * 2.2
+    if not 0.10 <= cw <= 0.45:
+        return None
+    ch = cw  # для 16:9-кадра прямоугольник 16:9 даёт равные нормализованные доли
+    x0 = min(max(cx - cw / 2, 0.0), 1.0 - cw)
+    y0 = min(max(cy + 0.08 * ch - ch / 2, 0.0), 1.0 - ch)
+    return (int(x0 * 1920), int(y0 * 1080), int(cw * 1920), int(ch * 1080))
+
 def render(src, out, login, title, cam, segments):
     title = re.sub(r"[^\w\s.,!?'\"-]", "", title, flags=re.UNICODE).strip() or "GTA 6"
     (WORK / "title.txt").write_text("\n".join(textwrap.wrap(title, 24)[:3]), encoding="utf-8")
