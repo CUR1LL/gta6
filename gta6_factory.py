@@ -122,14 +122,14 @@ def find_cam(src):
     except ImportError:
         print("  (opencv не установлен — пропускаю поиск вебки)")
         return None
+    print("  cv2:", getattr(cv2, "__file__", "ПУСТАЯ ОБЁРТКА"), getattr(cv2, "__version__", "?"))
+    if not hasattr(cv2, "CascadeClassifier"):
+        print("  у cv2 нет CascadeClassifier — поиск вебки отключён")
+        return None
     cap = cv2.VideoCapture(str(WORK / src))
     total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
     if total < 10:
         cap.release()
-        return None
-        print("  cv2:", getattr(cv2, "__file__", "ПУСТАЯ ОБЁРТКА"), getattr(cv2, "__version__", "?"))
-    if not hasattr(cv2, "CascadeClassifier"):
-        print("  у cv2 нет CascadeClassifier — поиск вебки отключён")
         return None
     casc = [cv2.CascadeClassifier(cv2.data.haarcascades + n)
             for n in ("haarcascade_frontalface_default.xml",
@@ -165,9 +165,9 @@ def find_cam(src):
         return None
     cx = statistics.median(b[0] for b in boxes)
     cy = statistics.median(b[1] for b in boxes)
-       fw = statistics.median(b[2] for b in boxes)
-    cw = min(max(fw * 3.2, 0.14), 0.55)   # вебка ≈ 3 ширины лица: голова + плечи
-    ch = cw * 1.1                          # чуть выше 16:9, чтобы не резать плечи снизу
+    fw = statistics.median(b[2] for b in boxes)
+    cw = min(max(fw * 3.2, 0.14), 0.55)
+    ch = cw * 1.1
     x0 = min(max(cx - cw / 2, 0.0), 1.0 - cw)
     y0 = min(max(cy + 0.10 * ch - ch / 2, 0.0), 1.0 - ch)
     return (int(x0 * 1920), int(y0 * 1080), int(cw * 1920), int(ch * 1080))
