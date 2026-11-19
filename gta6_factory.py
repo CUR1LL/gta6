@@ -202,7 +202,7 @@ def render(src, out, login, title, cam, segments):
         last = "[vout]"
     sh(["ffmpeg", "-nostdin", "-y", "-i", src, "-filter_complex", f,
         "-map", last, "-map", "0:a?", "-af", "loudnorm=I=-14:TP=-1.5:LRA=11",
-        "-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-pix_fmt", "yuv420p",
+        "-c:v", "libx264", "-preset", "fast", "-crf", "19", "-pix_fmt", "yuv420p",
         "-r", "30", "-c:a", "aac", "-b:a", "192k", "-ar", "48000",
         "-movflags", "+faststart", out])
 
