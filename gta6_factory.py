@@ -165,10 +165,11 @@ def find_cam(src):
         return None
     cx = statistics.median(b[0] for b in boxes)
     cy = statistics.median(b[1] for b in boxes)
-    cw = min(max(statistics.median(b[2] for b in boxes) * 2.3, 0.10), 0.45)
-    ch = cw
+       fw = statistics.median(b[2] for b in boxes)
+    cw = min(max(fw * 3.2, 0.14), 0.55)   # вебка ≈ 3 ширины лица: голова + плечи
+    ch = cw * 1.1                          # чуть выше 16:9, чтобы не резать плечи снизу
     x0 = min(max(cx - cw / 2, 0.0), 1.0 - cw)
-    y0 = min(max(cy + 0.08 * ch - ch / 2, 0.0), 1.0 - ch)
+    y0 = min(max(cy + 0.10 * ch - ch / 2, 0.0), 1.0 - ch)
     return (int(x0 * 1920), int(y0 * 1080), int(cw * 1920), int(ch * 1080))
 
 def render(src, out, login, title, cam, segments):
@@ -182,11 +183,15 @@ def render(src, out, login, title, cam, segments):
            "fontcolor=white@0.85:x=28:y=%d")
     if cam:
         x, y, w, h = [v - v % 2 for v in cam]
+        top = int(min(max(1080 / (w / h), 560), 800)) // 2 * 2
+        bot = 1920 - top
+        bw = int(1080 * 1080 / bot) // 2 * 2
+        bx = (1920 - bw) // 2
         f = ("[0:v]scale=1920:1080,setsar=1[base];"
-             f"[base]crop={w}:{h}:{x}:{y},scale=1080:640:force_original_aspect_ratio=increase,crop=1080:640[top];"
-             "[base]crop=912:1080:504:0,scale=1080:1280[bot];"
+             f"[base]crop={w}:{h}:{x}:{y},scale=1080:{top}[top];"
+             f"[base]crop={bw}:1080:{bx}:0,scale=1080:{bot}[bot];"
              "[top][bot]vstack=inputs=2[st];"
-             f"[st]{dt1 % 32}[d1];[d1]{dt2 % 656}[d2]")
+             f"[st]{dt1 % 32}[d1];[d1]{dt2 % (top + 16)}[d2]")
     else:
         f = ("[0:v]scale=1920:1080,setsar=1,crop=608:1080:656:0,scale=1080:1920[st];"
              f"[st]{dt1 % 100}[d1];[d1]{dt2 % 1560}[d2]")
