@@ -25,7 +25,7 @@ jobs:
       - name: ffmpeg и шрифты
         run: sudo apt-get update && sudo apt-get install -y ffmpeg fonts-dejavu-core
       - name: Зависимости Python
-        run: pip install requests yt-dlp faster-whisper
+        run: pip install requests yt-dlp faster-whisper opencv-python-headless
       - name: Фабрика клипов
         run: python gta6_factory.py
         env:
