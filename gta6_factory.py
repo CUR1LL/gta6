@@ -127,6 +127,10 @@ def find_cam(src):
     if total < 10:
         cap.release()
         return None
+        print("  cv2:", getattr(cv2, "__file__", "ПУСТАЯ ОБЁРТКА"), getattr(cv2, "__version__", "?"))
+    if not hasattr(cv2, "CascadeClassifier"):
+        print("  у cv2 нет CascadeClassifier — поиск вебки отключён")
+        return None
     casc = [cv2.CascadeClassifier(cv2.data.haarcascades + n)
             for n in ("haarcascade_frontalface_default.xml",
                       "haarcascade_frontalface_alt2.xml",
