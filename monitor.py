@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# Живой мониторинг стримов: ловит громкие моменты и шлёт клипы в Telegram за ~7-11 минут
+# Живой мониторинг стримов v2: с фильтром по эмоциональным маркерам в субтитрах
 import os, sys, subprocess, threading, time, shutil, datetime as dt
 from pathlib import Path
 import requests
@@ -11,10 +11,21 @@ F.WHISPER_MODEL = os.environ.get("LIVE_WHISPER", "base")
 
 REC = BASE / "rec"; REC.mkdir(exist_ok=True)
 WATCH = [l.strip().lower() for l in os.environ.get("WATCH", "").split(",") if l.strip()]
-SPIKE_K = float(os.environ.get("SPIKE_K", "2.1"))
+SPIKE_K = float(os.environ.get("SPIKE_K", "1.8"))
 COOLDOWN = int(os.environ.get("COOLDOWN", "240"))
 PRE, POST = 30, 60
 PROC_LOCK = threading.Lock()
+
+EMOTIONAL_KEYWORDS = [
+    "ого", "вау", "смотри", "смотрите", "невероятно", "круто", "класс",
+    "офигеть", "обалдеть", "жесть", "угар", "ржу", "смешно", "прикол",
+    "да ладно", "серьёзно", "точно", "идеально", "красавчик", "молодец",
+    "погнали", "давай", "быстрее", "осторожно", "внимание", "опасно",
+    "боже", "господи", "капец", "бля", "ох", "ааа", "ура", "победа",
+    "убил", "убили", "взорвал", "взрыв", "огонь", "топ", "лучший",
+    "wow", "omg", "holy", "insane", "crazy", "no way", "lets go",
+    "oh my god", "holy shit", "lets fucking go"
+]
 
 def headers():
     r = requests.post("https://id.twitch.tv/oauth2/token", params={
@@ -25,8 +36,25 @@ def headers():
 def live_now(h):
     d = requests.get("https://api.twitch.tv/helix/streams",
                      params={"user_login": ",".join(WATCH), "first": 100},
-                     headers=h, timeout=30).json()["data"]
+                     headers=h, timeout=30).json().get("data", [])
     return {s["user_login"]: s for s in d}
+
+def has_emotion(raw_path):
+    """Проверяет, есть ли в аудио эмоциональные маркеры. Возвращает True/False."""
+    try:
+        from faster_whisper import WhisperModel
+        model = WhisperModel("tiny", device="cpu", compute_type="int8")
+        segments, _ = model.transcribe(str(raw_path), vad_filter=True)
+        text = " ".join([s.text for s in segments]).lower()
+        found = [kw for kw in EMOTIONAL_KEYWORDS if kw in text]
+        if found:
+            print(f"  эмоциональные маркеры: {found[:5]}")
+            return True
+        print("  эмоциональных маркеров не найдено")
+        return False
+    except Exception as e:
+        print(f"  ошибка анализа субтитров (пропускаем фильтр): {e}")
+        return True  # если не смогли распознать — пропускаем, чтобы не терять клипы
 
 class Watcher(threading.Thread):
     def __init__(self, login, stream):
@@ -104,31 +132,27 @@ class Watcher(threading.Thread):
                             "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "192k",
                             "-ar", "48000", "-movflags", "+faststart", str(raw)],
                            cwd=WORK, check=True)
+            
+            # ФИЛЬТР: проверяем эмоциональность перед отправкой
+            if not has_emotion(raw):
+                print(f"[{self.login}] пропуск: нет эмоций в субтитрах")
+                try:
+                    os.remove(raw)
+                except Exception:
+                    pass
+                return
+            
             day = BASE / "READY" / dt.date.today().isoformat()
             day.mkdir(parents=True, exist_ok=True)
             caption = (f"LIVE: громкий момент | GTA 6\n\nПрямо со стрима {self.stream['user_name']}\n"
                        f"Канал: https://twitch.tv/{self.login}\n\n"
                        f"#GTA6 #ГТА6 #GTAVI #live #нарезки #стрим")
-                        # Фильтр по субтитрам: оставляем только эмоциональные моменты
-            try:
-                from faster_whisper import WhisperModel
-                model = WhisperModel("tiny", device="cpu", compute_type="int8")
-                segments, _ = model.transcribe(str(raw), language="ru", vad_filter=True)
-                text = " ".join([s.text for s in segments]).lower()
-                keywords = ["ого", "вау", "смотри", "смотрите", "невероятно", "круто", "класс", 
-                           "офигеть", "обалдеть", "жесть", "угар", "ржу", "смешно", "прикол",
-                           "да ладно", "серьёзно", "точно", "идеально", "красавчик", "молодец",
-                           "погнали", "давай", "быстрее", "осторожно", "внимание", "опасно"]
-                if not any(kw in text for kw in keywords):
-                    print(f"[{self.login}] пропуск: нет эмоциональных маркеров в субтитрах")
-                    os.remove(raw)
-                    continue
-                print(f"[{self.login}] найдены маркеры в субтитрах")
-            except Exception as e:
-                print(f"[{self.login}] ошибка анализа субтитров: {e}")
             make_clip(str(raw), self.login, f"{self.stream['user_name']}: LIVE-момент",
                       caption, day / f"live_{self.login}_{int(t)}")
-            raw.unlink(missing_ok=True)
+            try:
+                os.remove(raw)
+            except Exception:
+                pass
             print(f"[{self.login}] LIVE-клип отправлен")
         except Exception as e:
             print(f"[{self.login}] ошибка клипа:", e)
