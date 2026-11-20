@@ -109,6 +109,23 @@ class Watcher(threading.Thread):
             caption = (f"LIVE: громкий момент | GTA 6\n\nПрямо со стрима {self.stream['user_name']}\n"
                        f"Канал: https://twitch.tv/{self.login}\n\n"
                        f"#GTA6 #ГТА6 #GTAVI #live #нарезки #стрим")
+                        # Фильтр по субтитрам: оставляем только эмоциональные моменты
+            try:
+                from faster_whisper import WhisperModel
+                model = WhisperModel("tiny", device="cpu", compute_type="int8")
+                segments, _ = model.transcribe(str(raw), language="ru", vad_filter=True)
+                text = " ".join([s.text for s in segments]).lower()
+                keywords = ["ого", "вау", "смотри", "смотрите", "невероятно", "круто", "класс", 
+                           "офигеть", "обалдеть", "жесть", "угар", "ржу", "смешно", "прикол",
+                           "да ладно", "серьёзно", "точно", "идеально", "красавчик", "молодец",
+                           "погнали", "давай", "быстрее", "осторожно", "внимание", "опасно"]
+                if not any(kw in text for kw in keywords):
+                    print(f"[{self.login}] пропуск: нет эмоциональных маркеров в субтитрах")
+                    os.remove(raw)
+                    continue
+                print(f"[{self.login}] найдены маркеры в субтитрах")
+            except Exception as e:
+                print(f"[{self.login}] ошибка анализа субтитров: {e}")
             make_clip(str(raw), self.login, f"{self.stream['user_name']}: LIVE-момент",
                       caption, day / f"live_{self.login}_{int(t)}")
             raw.unlink(missing_ok=True)
